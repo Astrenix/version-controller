@@ -3,7 +3,11 @@
 #  LinkFlow · 智能链接管理平台 · 交互式安装脚本
 #  从 GitHub Releases 下载预编译产物,无需 Go/Node.js 环境
 #  支持: macOS / Linux (amd64 / arm64)
-#  数据库: MySQL 8.0  |  可选: Nginx + SSL + Cloudflare
+#
+#  两种部署方式(启动时选择):
+#    1) 宝塔面板 —— 只拉程序(二进制+前端),用户自己在宝塔加 Go 项目+反代,
+#                   数据库和管理员由浏览器里的网页安装向导完成
+#    2) 独立服务器 —— 传统一键:自动装 MySQL + systemd 服务 + Nginx + SSL
 #
 #  安装后目录结构:
 #    /opt/linkflow/
@@ -35,6 +39,7 @@ DEFAULT_API_PORT="9110"
 
 # ── 全局变量 ──────────────────────────────────────────────────
 OS="" ARCH="" PKG_MGR=""
+DEPLOY_MODE=""            # baota(宝塔,只拉程序)| standalone(独立服务器,全自动)
 INSTALL_DIR="" INSTALL_MODE=""
 API_PORT="" JWT_SECRET=""
 DB_HOST="" DB_PORT="" DB_NAME="" DB_USER="" DB_PASS=""
@@ -879,6 +884,69 @@ print_done() {
   fi
 }
 
+# ── 部署方式选择 ──────────────────────────────────────────────
+choose_deploy_mode() {
+  step "部署方式"
+  local def=2
+  if [ -d /www/server/panel ]; then
+    info "检测到宝塔面板,推荐用宝塔模式"
+    def=1
+  fi
+  echo ""
+  echo -e "  ${G}1${N}) ${W}宝塔面板${N}   —— 只拉程序(二进制+前端),自己在宝塔加 Go 项目+反代"
+  echo -e "                 数据库和管理员打开网页后由${W}安装向导${N}完成(推荐)"
+  echo -e "  ${C}2${N}) ${W}独立服务器${N} —— 自动装 MySQL + systemd 服务 + nginx(传统一键)"
+  echo ""
+  local c; read -rp "  选择 [${def}]: " c; c="${c:-$def}"
+  [ "$c" = "1" ] && DEPLOY_MODE="baota" || DEPLOY_MODE="standalone"
+}
+
+# ── 宝塔模式:只下载程序,不碰 MySQL / systemd / nginx ─────────
+baota_flow() {
+  step "宝塔部署 · 拉取程序"
+  info "此模式只把程序下载解压好,不装数据库、不配服务、不配反代"
+  info "数据库连接和管理员账号,稍后在浏览器打开站点由网页安装向导填写"
+  echo ""
+  INSTALL_DIR=$(prompt_input "程序目录" "/www/wwwroot/linkflow")
+  local port_input
+  while true; do
+    port_input=$(prompt_input "运行端口(稍后宝塔 Go 项目填一样的)" "$DEFAULT_API_PORT")
+    [[ "$port_input" =~ ^[0-9]+$ ]] && [ "$port_input" -ge 1 ] && [ "$port_input" -le 65535 ] && { API_PORT="$port_input"; break; }
+    warn "端口范围 1-65535"
+  done
+
+  download_release              # 复用:下载后端(含 start.sh + .env 模板)+ 前端 dist
+  chmod +x "${INSTALL_DIR}/start.sh" 2>/dev/null || true
+
+  print_baota_done
+}
+
+print_baota_done() {
+  local ver; ver=$(cat "${INSTALL_DIR}/.version" 2>/dev/null || echo "?")
+  echo ""
+  echo -e "${G}  ╔════════════════════════════════════════════════════╗${N}"
+  echo -e "${G}  ║${N}   ${W}📦  程序已拉取完成(宝塔模式)${N}"
+  echo -e "${G}  ╠════════════════════════════════════════════════════╣${N}"
+  echo -e "${G}  ║${N}  目录        ${INSTALL_DIR}"
+  echo -e "${G}  ║${N}  版本        ${W}v${ver}${N}"
+  echo -e "${G}  ║${N}  端口        ${W}${API_PORT}${N}"
+  echo -e "${G}  ║${N}  内容        linkflow-api · dist/ · start.sh · .env.production.example"
+  echo -e "${G}  ╠════════════════════════════════════════════════════╣${N}"
+  echo -e "${G}  ║${N}  ${W}接下来在宝塔面板手动完成:${N}"
+  echo -e "${G}  ║${N}   ${C}1.${N} 软件商店 → Go 项目管理器 → 添加项目"
+  echo -e "${G}  ║${N}       运行目录 ${DIM}${INSTALL_DIR}${N}"
+  echo -e "${G}  ║${N}       启动脚本 ${DIM}${INSTALL_DIR}/start.sh${N}"
+  echo -e "${G}  ║${N}       端口     ${DIM}${API_PORT}${N}"
+  echo -e "${G}  ║${N}   ${C}2.${N} 网站 → 添加站点(纯静态)→ 反向代理 ${DIM}http://127.0.0.1:${API_PORT}${N}"
+  echo -e "${G}  ║${N}   ${C}3.${N} SSL(可选)→ Let's Encrypt → 强制 HTTPS"
+  echo -e "${G}  ║${N}   ${C}4.${N} 浏览器打开站点 → ${W}网页安装向导${N} 填数据库+管理员 → 完成"
+  echo -e "${G}  ║${N}"
+  echo -e "${G}  ║${N}  ${DIM}不用手动建 .env / 建库,向导会写好并自动重启${N}"
+  echo -e "${G}  ╚════════════════════════════════════════════════════╝${N}"
+  echo ""
+  info "详细步骤见项目 DEPLOY-BAOTA.md"
+}
+
 # ── 主流程 ────────────────────────────────────────────────────
 banner() {
   clear 2>/dev/null || true; echo ""
@@ -895,10 +963,19 @@ banner() {
 
 main() {
   banner
-  collect_config
+  choose_deploy_mode
   detect_system
   step "依赖检查"
   check_curl
+
+  # 宝塔模式:只拉程序,后续在宝塔 GUI + 网页向导完成
+  if [ "$DEPLOY_MODE" = "baota" ]; then
+    baota_flow
+    exit 0
+  fi
+
+  # 独立服务器模式:传统一键(装 MySQL + systemd + nginx)
+  collect_config
   check_nginx
   check_certbot
   install_mysql
