@@ -31,7 +31,7 @@ set -euo pipefail
 
 # ── 全局常量 ──────────────────────────────────────────────────
 PROJECT="linkflow"
-GITHUB_REPO="DoBestone/version-controller"
+GITHUB_REPO="Astrenix/version-controller"
 SERVICE_NAME="linkflow"
 BINARY_NAME="linkflow-api"
 DEFAULT_INSTALL_DIR="/opt/linkflow"
@@ -427,9 +427,6 @@ DB_NAME=${DB_NAME}
 
 # --- JWT 签名密钥(48 字符强随机,本次安装生成)---
 JWT_SECRET=${JWT_SECRET}
-
-# --- 授权绕过(生产默认关闭)---
-LICENSE_BYPASS=false
 
 # --- CORS 允许的前端源 ---
 CORS_ALLOWED_ORIGINS=${cors_value}

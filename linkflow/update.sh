@@ -9,7 +9,7 @@
 set -euo pipefail
 
 PROJECT="linkflow"
-REPO="DoBestone/version-controller"
+REPO="Astrenix/version-controller"
 BINARY_NAME="linkflow-api"
 SERVICE_NAME="linkflow"
 
