@@ -1,5 +1,6 @@
 #!/bin/bash
-# nexcore-s-ui · install (fresh install only — for upgrades use update.sh
+# tovanix-proxy-node · install(仅全新安装;升级走 update.sh)
+# (fresh install only — for upgrades use update.sh
 # or `nexcore-s-ui update`).
 #
 # 用法:
@@ -15,7 +16,7 @@
 #   - 用 --fixed 回退到老默认 3095 / /app/
 #
 # 与上游 alireza0/s-ui 完全独立,可在同一台机器共存:
-#   - 安装目录    /usr/local/nexcore-s-ui/      (上游是 /usr/local/s-ui/)
+#   - 安装目录    /usr/local/nexcore-s-ui/      (运行时身份刻意保持不变,见 README)
 #   - systemd     nexcore-s-ui.service          (上游是 s-ui.service)
 #   - CLI 命令    /usr/bin/nexcore-s-ui         (上游是 /usr/bin/s-ui)
 #   - 数据库      /usr/local/nexcore-s-ui/db/nexcore-s-ui.db
@@ -735,7 +736,24 @@ apply_initial_settings
 # 时序不能动:apiv1 在进程 init 时一次性把 tokens 表载入内存 cache、运行期只信
 # 缓存,所以 token 必须在 systemctl start/restart 【之前】落库。
 step "生成 admin scope API token…"
-INSTALLER_TOKEN="$("${INSTALL_DIR}/sui" token -add -desc "installer-bootstrap" 2>/dev/null | tail -1)"
+# 🩸 必须校验【形状】,不能只判非空。
+#
+# sui token -add 的错误从前打在 stdout,于是 `| tail -1` 捞到的是
+# "db init failed: ..." 这类字符串 —— 它非空,`[[ -z ]]` 一点都判不出来:
+# 装机界面会把错误消息当 token 打给运维,回调还会把它当 token 发给主控。
+#
+# CLI 侧已改为「错误走 stderr + 退出码非 0」,这里再钉一道形状校验:
+# token 是 common.Random(32),恒为 32 位 [A-Za-z0-9]。
+# 两道都留着,是因为任何一道单独都可能被后来的改动打破,而失败是静默的。
+INSTALLER_TOKEN=""
+if _tok_out="$("${INSTALL_DIR}/sui" token -add -desc "installer-bootstrap" 2>/dev/null | tail -1)"; then
+    if [[ "${_tok_out}" =~ ^[A-Za-z0-9]{32}$ ]]; then
+        INSTALLER_TOKEN="${_tok_out}"
+    else
+        warn "sui token -add 返回了非 token 内容(已丢弃): ${_tok_out:0:60}"
+    fi
+fi
+unset _tok_out
 if [[ -z "${INSTALLER_TOKEN}" ]]; then
     warn "API token 生成失败 —— 这台节点现在没有任何可用入口。"
     warn "服务起来后手动补:${cyan}${INSTALL_DIR}/sui token -add -desc manual${plain}"

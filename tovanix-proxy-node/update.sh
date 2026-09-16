@@ -1,5 +1,5 @@
 #!/bin/bash
-# nexcore-s-ui · update
+# tovanix-proxy-node · update
 #
 # 用法:
 #   bash <(curl -Ls https://raw.githubusercontent.com/Astrenix/version-controller/main/tovanix-proxy-node/update.sh)
