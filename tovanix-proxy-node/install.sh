@@ -101,6 +101,7 @@ ${cyan}OPTIONS:${plain}
   --secure-entry=xxx   启用安全入口 + 指定 slug
   --fixed              用老默认值(端口 3095 / 路径 /app/),回退兼容
   --force, -f          强制重装(会覆盖 ${INSTALL_DIR},保留 db/)
+  --no-tune            不做网络调优(BBR / fq / 收发缓冲;已调过的机器本来就会跳过)
   --help, -h           显示本帮助
 
 ${cyan}回调(主控自动装节点):${plain}
@@ -144,6 +145,7 @@ for arg in "$@"; do
         --secure-entry)          SECURE_ENTRY=1 ;;
         --secure-entry=*)        SECURE_ENTRY=1; SECURE_ENTRY_PATH="${arg#*=}" ;;
         --fixed)                 USE_FIXED_DEFAULT=1 ;;
+        --no-tune)               NO_TUNE=1 ;;
         --report-url=*)          REPORT_URL_RAW="${arg#*=}" ;;
         --report-allow-http)     REPORT_ALLOW_HTTP=1 ;;
         --report-key=*)
@@ -558,6 +560,72 @@ setup_first_run() {
 
 # ── 磁盘占用防护 ────────────────────────────────────────────────────────
 #
+# 网络调优(BBR + fq + 大收发缓冲)。
+# 2026-10-29 实测:在售节点里只有供应商镜像自带调优的那几台是 BBR(`99-nokvm-*.conf`),
+# 换一家供应商的新机(日本原生One)是 cubic + 208KB 缓冲 —— 跨境长链路上吞吐直接打折,
+# Hysteria2 走的 QUIC 也要大 UDP 缓冲(quic-go 建议 7MB 以上)。
+# 调优此前从来不在安装流程里,有没有全看供应商。
+# 已经是 BBR + fq 且缓冲 >= 16MB 就跳过(不覆盖供应商 / 运维的设置);
+# 写独立文件,删掉它再 sysctl --system 即回退。
+tune_network() {
+    if [[ "${NO_TUNE:-0}" == "1" ]]; then
+        step "按 --no-tune 跳过网络调优"
+        return 0
+    fi
+    local cc qdisc rmax
+    cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "")
+    qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo "")
+    rmax=$(sysctl -n net.core.rmem_max 2>/dev/null || echo 0)
+    if [[ "$cc" == "bbr" && "$qdisc" == "fq" && "$rmax" -ge 16777216 ]]; then
+        step "网络已调优(bbr / fq / 缓冲 ${rmax}),跳过"
+        return 0
+    fi
+    modprobe tcp_bbr 2>/dev/null || true
+    if ! grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
+        warn "内核不支持 BBR,跳过网络调优(不影响安装)"
+        return 0
+    fi
+    step "网络调优(BBR + fq + 收发缓冲)…"
+    echo tcp_bbr > /etc/modules-load.d/tovanix-bbr.conf 2>/dev/null || true
+    # 缓冲上限按内存给:>= 1GB 用 32MB,更小的机器用 16MB(上限只是允许值,不是常驻占用)
+    local mem_kb buf
+    mem_kb=$(awk '/MemTotal/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
+    if [[ "$mem_kb" -ge 900000 ]]; then buf=33554432; else buf=16777216; fi
+    cat > /etc/sysctl.d/99-tovanix-net.conf <<TUNE_EOF
+# Tovanix 节点网络调优(install.sh 写入)。删除本文件并 sysctl --system 即回退。
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+net.ipv4.tcp_mtu_probing = 1
+net.ipv4.tcp_slow_start_after_idle = 0
+net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_fin_timeout = 15
+net.ipv4.tcp_keepalive_time = 600
+net.ipv4.tcp_keepalive_intvl = 30
+net.ipv4.tcp_keepalive_probes = 6
+net.core.somaxconn = 8192
+net.ipv4.tcp_max_syn_backlog = 8192
+net.core.netdev_max_backlog = 16384
+net.ipv4.ip_local_port_range = 1024 65535
+net.core.rmem_max = ${buf}
+net.core.wmem_max = ${buf}
+net.core.rmem_default = 262144
+net.core.wmem_default = 262144
+net.ipv4.tcp_rmem = 4096 262144 ${buf}
+net.ipv4.tcp_wmem = 4096 262144 ${buf}
+TUNE_EOF
+    if ! sysctl -p /etc/sysctl.d/99-tovanix-net.conf >/dev/null 2>&1; then
+        warn "部分调优项没生效(容器 / 受限内核常见),不影响安装"
+    fi
+    # default_qdisc 只管新建的队列,已有网卡的根队列换成 fq(瞬时,不断连接)
+    local dev
+    dev=$(ip -4 route show default 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i=="dev"){print $(i+1); exit}}')
+    if [[ -n "$dev" ]]; then
+        tc qdisc replace dev "$dev" root fq 2>/dev/null || true
+    fi
+    ok "网络调优完成:$(sysctl -n net.ipv4.tcp_congestion_control) / $(sysctl -n net.core.default_qdisc) / 缓冲 $(sysctl -n net.core.rmem_max)"
+}
+
 # 节点常配 10G 小盘,而 systemd-journald 默认【没有上限】——
 # 生产实测一台跑了 93 天的节点,journal 吃掉 1.9G,占 20G 盘的 10%;
 # 换成 10G 盘就是 19%,而且还在涨。
@@ -761,6 +829,7 @@ fi
 
 # 在启动服务之前收紧 journal 上限 —— 服务一起来就开始写日志了
 harden_journald
+tune_network
 
 step "启动服务"
 systemctl restart "${SERVICE_NAME}"
