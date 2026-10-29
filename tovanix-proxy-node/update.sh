@@ -75,7 +75,9 @@ if [[ -z "${TARGET}" ]]; then
     RAW=$(curl -fsSL "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/releases?per_page=100" 2>/dev/null || true)
     TARGET=$(printf '%s\n' "$RAW" \
         | grep -oE '"tag_name":[[:space:]]*"'"${PROJECT}"'-v[^"]+"' \
-        | head -1 | sed -E 's/.*"'"${PROJECT}"'-(v[^"]+)"/\1/')
+        | sed -E 's/.*"'"${PROJECT}"'-(v[^"]+)"/\1/' | sort -V | tail -1)
+    # 🩸 按版本号取最大,不取接口返回的第一个(2026-10-29):同一提交上发的几个 release 创建时间相同,
+    # GitHub 再按 tag 名【字符串】倒序排 —— v2.0.5 排在 v2.0.12 前面,装出来的永远是 2.0.5。
     if [[ -z "${TARGET}" ]]; then
         echo -e "${red}无法获取 ${PROJECT} 的最新版本(GitHub API 限流?或产物仓尚无该项目的 release)${plain}" >&2
         exit 1
